@@ -1,0 +1,875 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>1주년 벽돌깨기</title>
+  <style>
+    :root { color-scheme: light; }
+    body{
+      margin:0;
+      min-height:100vh;
+      display:grid;
+      place-items:center;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      background: radial-gradient(1200px 800px at 50% 30%, #ffe6f2, #ffd1e8);
+      -webkit-tap-highlight-color: transparent;
+      overscroll-behavior: none;
+    }
+    .wrap{
+      width:min(520px, 94vw);
+      display:grid;
+      gap:12px;
+      justify-items:center;
+    }
+    .hud{
+      width:100%;
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:10px;
+      user-select:none;
+      font-size:14px;
+    }
+    .left{ display:flex; gap:10px; align-items:center; }
+    .pill{
+      padding:8px 10px;
+      border-radius:999px;
+      border:1px solid rgba(0,0,0,0.10);
+      background: rgba(255,255,255,0.78);
+      backdrop-filter: blur(6px);
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+    }
+    .right{ display:flex; gap:10px; align-items:center; }
+    button{
+      border:1px solid rgba(0,0,0,0.12);
+      background: rgba(255,255,255,0.88);
+      padding:8px 12px;
+      border-radius:12px;
+      cursor:pointer;
+      font-weight:800;
+    }
+    button:hover{ filter: brightness(0.98); }
+    canvas{
+      width:100%;
+      /* 📱 세로모드 최적화 */
+      aspect-ratio: 9 / 16;
+      border-radius:18px;
+      background: linear-gradient(180deg, #ff5aa5, #ff9fd0);
+      box-shadow: 0 10px 40px rgba(0,0,0,0.18);
+      touch-action:none;
+    }
+    .help{
+      width:100%;
+      text-align:center;
+      opacity:0.8;
+      font-size:13px;
+      line-height:1.35;
+    }
+    .kbd{ font-weight:800; padding:2px 6px; border-radius:8px; border:1px solid rgba(0,0,0,0.12); background: rgba(255,255,255,0.75); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hud">
+      <div class="left">
+        <div class="pill">점수: <span id="score">0</span></div>
+        <div class="pill">목숨: <span id="lives">5</span></div>
+      </div>
+      <div class="right">
+        <button id="sound">🔊 on</button>
+        <button id="restart">다시 시작</button>
+      </div>
+    </div>
+
+    <canvas id="c" width="900" height="1600" aria-label="벽돌깨기"></canvas>
+    <div class="help">
+      손가락으로 패들 이동 · 화면 탭으로 시작<br/>
+      (아이폰은 <b>첫 탭</b> 이후에만 소리가 나요)
+    </div>
+  </div>
+
+<script>
+(() => {
+  'use strict';
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const scoreEl = document.getElementById('score');
+  const livesEl = document.getElementById('lives');
+  const restartBtn = document.getElementById('restart');
+  const soundBtn = document.getElementById('sound');
+
+  const SURPRISE_MESSAGE = '지효야 1주년 축하해 ! 💙';
+  const PLAY_TEXT_LEFT = '대훈';
+  const PLAY_TEXT_RIGHT = '지효';
+
+  // ===== utils =====
+  function clamp(v,a,b){ return Math.max(a, Math.min(b,v)); }
+  function rand(min,max){ return Math.random()*(max-min)+min; }
+
+  function roundRectPath(x,y,w,h,r){
+    const rr = Math.min(r, w/2, h/2);
+    ctx.beginPath();
+    ctx.moveTo(x+rr,y);
+    ctx.arcTo(x+w,y,x+w,y+h,rr);
+    ctx.arcTo(x+w,y+h,x,y+h,rr);
+    ctx.arcTo(x,y+h,x,y,rr);
+    ctx.arcTo(x,y,x+w,y,rr);
+    ctx.closePath();
+  }
+
+  function wrapText(text, x, y, maxW, lineH, font, color){
+    ctx.save();
+    ctx.font = font;
+    ctx.fillStyle = color;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    // ✅ 문자열 안의 실제 개행(\n)을 줄바꿈으로 처리
+    const rawLines = String(text).split('\n');
+    const lines = [];
+    for (const raw of rawLines){
+      const words = raw.split(' ');
+      let line = '';
+      for (const w of words){
+        const test = line ? (line + ' ' + w) : w;
+        if (ctx.measureText(test).width > maxW && line){
+          lines.push(line);
+          line = w;
+        } else {
+          line = test;
+        }
+      }
+      if (line) lines.push(line);
+    }
+
+    const startY = y - (lines.length - 1) * (lineH/2);
+    lines.forEach((ln,i)=> ctx.fillText(ln, x, startY + i*lineH));
+    ctx.restore();
+  }
+
+  // ===== sound (iOS-safe: WebAudio, only after user gesture) =====
+  let audioEnabled = true;
+  let audioUnlocked = false;
+  let audioCtx = null;
+
+  function setSoundUI(){ soundBtn.textContent = audioEnabled ? '🔊 on' : '🔇 off'; }
+  setSoundUI();
+
+  function ensureAudio(){
+    if (!audioEnabled) return;
+    try {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      audioUnlocked = true;
+    } catch (_) {
+      audioUnlocked = false;
+    }
+  }
+
+  function beep(freq, dur=0.06, type='sine', gain=0.06){
+    if (!audioEnabled || !audioUnlocked || !audioCtx) return;
+    const t0 = audioCtx.currentTime;
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(freq, t0);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(gain, t0 + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    o.connect(g).connect(audioCtx.destination);
+    o.start(t0);
+    o.stop(t0 + dur + 0.02);
+  }
+
+  function click(dur=0.04){
+    if (!audioEnabled || !audioUnlocked || !audioCtx) return;
+    const t0 = audioCtx.currentTime;
+    const b = audioCtx.createBuffer(1, Math.floor(audioCtx.sampleRate*dur), audioCtx.sampleRate);
+    const data = b.getChannelData(0);
+    for (let i=0;i<data.length;i++) data[i] = (Math.random()*2-1) * (1 - i/data.length);
+    const src = audioCtx.createBufferSource();
+    const g = audioCtx.createGain();
+    g.gain.value = 0.06;
+    src.buffer = b;
+    src.connect(g).connect(audioCtx.destination);
+    src.start(t0);
+  }
+
+  // ===== game state =====
+  const state = {
+    running: false,        // 카운트다운/시작 전엔 false
+    won: false,
+    lost: false,
+    score: 0,
+    lives: 5,
+    left: false,
+    right: false,
+    pointerX: null,
+    pointerActive: false,
+    pointerId: null,
+
+    startedOnce: false,
+    phase: 'intro',        // intro | countdown | play | win | lose
+    countdownLeft: 3,
+    countdownT: 0,
+  };
+
+  const dims = { w: 390, h: 780, dpr: 2 };
+  let timeSec = 0;
+
+  const paddle = { x: 0, y: 0, w: 120, h: 14, speed: 10 };
+  const ball = { x: 0, y: 0, r: 8, vx: 4.1, vy: -4.6, stuck: true, max: 9.0 };
+
+  // 벽돌: 텍스트 모양으로 생성("대훈 ❤️ 지효")
+  const bricks = {
+    rows: 8,
+    cols: 16,
+    gap: 7,
+    top: 80,
+    left: 18,
+    w: 0,
+    h: 18,
+    grid: []
+  };
+
+  const maskCanvas = document.createElement('canvas');
+  const maskCtx = maskCanvas.getContext('2d');
+
+  // ===== fireworks =====
+  const fireworks = {
+    active: false,
+    t: 0,
+    spawnEvery: 0.26,
+    particles: [],
+    burst(bursts=2){
+      for (let b=0;b<bursts;b++){
+        const cx = rand(dims.w*0.12, dims.w*0.88);
+        const cy = rand(dims.h*0.12, dims.h*0.45);
+        const hue = rand(300, 360);
+        const n = Math.floor(rand(28, 48));
+        for (let i=0;i<n;i++){
+          const a = rand(0, Math.PI*2);
+          const sp = rand(1.8, 6.2);
+          this.particles.push({
+            x: cx, y: cy,
+            vx: Math.cos(a)*sp,
+            vy: Math.sin(a)*sp,
+            life: rand(0.85, 1.35),
+            age: 0,
+            hue,
+            size: rand(1.4, 3.0)
+          });
+        }
+      }
+      click(0.06);
+    },
+    update(dt){
+      if (!this.active) return;
+      this.t += dt;
+      if (this.t >= this.spawnEvery){ this.t = 0; this.burst(1); }
+      const g = 5.6;
+      this.particles = this.particles.filter(p=>{
+        p.age += dt;
+        p.vy += g*dt;
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vx *= 0.985;
+        p.vy *= 0.985;
+        return p.age < p.life;
+      });
+    },
+    draw(){
+      if (!this.active) return;
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      for (const p of this.particles){
+        const t = p.age/p.life;
+        const alpha = (1-t)*0.95;
+        ctx.fillStyle = `hsla(${p.hue}, 95%, 70%, ${alpha})`;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size, 0, Math.PI*2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+  };
+
+  // ===== sizing =====
+  function resize(){
+    const rect = canvas.getBoundingClientRect();
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const w = Math.round(rect.width * dpr);
+    const h = Math.round(rect.height * dpr);
+    if (canvas.width !== w || canvas.height !== h){
+      canvas.width = w;
+      canvas.height = h;
+    }
+    dims.w = rect.width;
+    dims.h = rect.height;
+    dims.dpr = dpr;
+
+    ctx.setTransform(1,0,0,1,0,0);
+    ctx.scale(dpr, dpr);
+
+    paddle.w = clamp(dims.w*0.30, 110, 165);
+    paddle.h = clamp(dims.h*0.020, 12, 16);
+    paddle.y = dims.h - paddle.h - 22;
+    paddle.x = clamp(paddle.x, 0, dims.w - paddle.w);
+
+    ball.r = clamp(dims.w*0.018, 7, 10);
+
+    bricks.left = Math.max(14, dims.w*0.06);
+    bricks.top  = Math.max(74, dims.h*0.12);
+    bricks.gap  = Math.max(6, dims.w*0.012);
+
+    resetBricksFromText();
+
+    if (ball.stuck){
+      ball.x = paddle.x + paddle.w/2;
+      ball.y = paddle.y - ball.r - 2;
+    }
+  }
+
+  function resetBall(){
+    ball.stuck = true;
+    const dir = (Math.random() < 0.5 ? -1 : 1);
+    ball.vx = 4.0 * dir;
+    ball.vy = -4.8;
+    ball.x = paddle.x + paddle.w/2;
+    ball.y = paddle.y - ball.r - 2;
+  }
+
+  function resetBricksFromText(){
+    const usableW = dims.w - bricks.left*2;
+    const usableH = Math.max(160, dims.h*0.23);
+
+    bricks.w = (usableW - bricks.gap*(bricks.cols-1)) / bricks.cols;
+    bricks.h = clamp(usableH / (bricks.rows + 0.35*(bricks.rows-1)), 14, 22);
+
+    maskCanvas.width = Math.max(1, Math.floor(usableW));
+    maskCanvas.height = Math.max(1, Math.floor(usableH));
+
+    maskCtx.clearRect(0,0,maskCanvas.width,maskCanvas.height);
+
+    const text = `${PLAY_TEXT_LEFT} ❤️ ${PLAY_TEXT_RIGHT}`;
+    let fontPx = Math.floor(Math.min(maskCanvas.width * 0.20, maskCanvas.height * 0.58));
+
+    maskCtx.save();
+    maskCtx.textAlign = 'center';
+    maskCtx.textBaseline = 'middle';
+    maskCtx.fillStyle = 'rgba(0,0,0,1)';
+
+    for (let i=0;i<12;i++){
+      maskCtx.font = `900 ${fontPx}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+      const m = maskCtx.measureText(text).width;
+      if (m <= maskCanvas.width*0.92) break;
+      fontPx = Math.max(18, Math.floor(fontPx * 0.92));
+    }
+
+    maskCtx.fillText(text, maskCanvas.width/2, maskCanvas.height/2);
+    maskCtx.restore();
+
+    const img = maskCtx.getImageData(0,0,maskCanvas.width,maskCanvas.height).data;
+
+    bricks.grid = [];
+    for (let r=0;r<bricks.rows;r++){
+      const row = [];
+      for (let c=0;c<bricks.cols;c++){
+        const cellX = c * (bricks.w + bricks.gap);
+        const cellY = r * (bricks.h + bricks.gap);
+
+        const samples = [
+          [0.50, 0.50],
+          [0.30, 0.50],
+          [0.70, 0.50],
+          [0.50, 0.30],
+          [0.50, 0.70],
+        ];
+        let hit = 0;
+        for (const [ux,uy] of samples){
+          const sx = clamp(Math.floor(cellX + bricks.w*ux), 0, maskCanvas.width-1);
+          const sy = clamp(Math.floor(cellY + bricks.h*uy), 0, maskCanvas.height-1);
+          const idx = (sy*maskCanvas.width + sx) * 4;
+          if (img[idx+3] > 30) hit++;
+        }
+        row.push({ alive: hit >= 2 });
+      }
+      bricks.grid.push(row);
+    }
+
+    let aliveCount = 0;
+    for (let r=0;r<bricks.rows;r++) for (let c=0;c<bricks.cols;c++) if (bricks.grid[r][c].alive) aliveCount++;
+    if (aliveCount < 20){
+      const rMid = Math.floor(bricks.rows/2);
+      for (let c=1;c<bricks.cols-1;c+=2) bricks.grid[rMid][c].alive = true;
+    }
+  }
+
+  function resetGame(){
+    state.won = false;
+    state.lost = false;
+    state.score = 0;
+    state.lives = 5;
+    state.pointerX = null;
+    state.pointerActive = false;
+    state.pointerId = null;
+    state.left = false;
+    state.right = false;
+
+    fireworks.active = false;
+    fireworks.particles = [];
+    fireworks.t = 0;
+
+    scoreEl.textContent = '0';
+    livesEl.textContent = '5';
+
+    state.running = false;
+    state.phase = 'intro';
+    state.countdownLeft = 3;
+    state.countdownT = 0;
+
+    resize();
+    paddle.x = (dims.w - paddle.w)/2;
+    resetBall();
+  }
+
+  function allCleared(){
+    for (let r=0;r<bricks.rows;r++){
+      for (let c=0;c<bricks.cols;c++) if (bricks.grid[r][c].alive) return false;
+    }
+    return true;
+  }
+
+  function circleRectCollide(cx,cy,cr,rx,ry,rw,rh){
+    const x = clamp(cx, rx, rx+rw);
+    const y = clamp(cy, ry, ry+rh);
+    const dx = cx-x, dy = cy-y;
+    return (dx*dx + dy*dy) <= cr*cr;
+  }
+
+  // ===== start flow =====
+  function beginCountdown(){
+    if (state.phase === 'play') return;
+    state.startedOnce = true;
+    ensureAudio();
+
+    state.phase = 'countdown';
+    state.running = false;
+    state.countdownLeft = 3;
+    state.countdownT = 0;
+    ball.stuck = true;
+
+    beep(880, 0.08, 'sine', 0.05);
+  }
+
+  function startPlay(){
+    state.phase = 'play';
+    state.running = true;
+    ball.stuck = false;
+    beep(1100, 0.08, 'triangle', 0.06);
+  }
+
+  // ===== input =====
+  window.addEventListener('keydown', (e)=>{
+    if (e.key === 'ArrowLeft') state.left = true;
+    if (e.key === 'ArrowRight') state.right = true;
+    if (e.key === ' ' || e.key === 'Enter'){
+      if (state.phase === 'intro') beginCountdown();
+    }
+  });
+  window.addEventListener('keyup', (e)=>{
+    if (e.key === 'ArrowLeft') state.left = false;
+    if (e.key === 'ArrowRight') state.right = false;
+  });
+
+  function setPointerFromClientX(clientX){
+    const rect = canvas.getBoundingClientRect();
+    state.pointerX = clientX - rect.left;
+  }
+
+  canvas.addEventListener('pointerdown', (e)=>{
+    ensureAudio();
+    if (state.phase === 'intro') beginCountdown();
+
+    state.pointerActive = true;
+    state.pointerId = e.pointerId;
+    canvas.setPointerCapture(e.pointerId);
+    setPointerFromClientX(e.clientX);
+  });
+
+  canvas.addEventListener('pointermove', (e)=>{
+    if (state.pointerActive && state.pointerId === e.pointerId) setPointerFromClientX(e.clientX);
+    else setPointerFromClientX(e.clientX);
+  });
+
+  canvas.addEventListener('pointerup', (e)=>{
+    if (state.pointerId === e.pointerId){
+      state.pointerActive = false;
+      state.pointerId = null;
+      try { canvas.releasePointerCapture(e.pointerId); } catch(_){ }
+    }
+  });
+
+  canvas.addEventListener('pointercancel', (e)=>{
+    if (state.pointerId === e.pointerId){
+      state.pointerActive = false;
+      state.pointerId = null;
+    }
+  });
+
+  canvas.addEventListener('touchmove', (e)=>{ e.preventDefault(); }, { passive:false });
+
+  restartBtn.addEventListener('click', () => { ensureAudio(); resetGame(); });
+  window.addEventListener('resize', () => { resize(); });
+
+  soundBtn.addEventListener('click', () => {
+    ensureAudio();
+    audioEnabled = !audioEnabled;
+    setSoundUI();
+    if (audioEnabled) beep(660, 0.06, 'sine', 0.05);
+  });
+
+  // ===== update =====
+  function update(dt){
+    // countdown
+    if (state.phase === 'countdown'){
+      state.countdownT += dt;
+      if (state.countdownT >= 1.0){
+        state.countdownT = 0;
+        state.countdownLeft -= 1;
+        if (state.countdownLeft > 0){
+          beep(880, 0.08, 'sine', 0.05);
+        } else {
+          startPlay();
+        }
+      }
+    }
+
+    // paddle
+    let target = null;
+    if (state.pointerX != null) target = state.pointerX - paddle.w/2;
+    if (state.left)  target = (target ?? paddle.x) - paddle.speed*2;
+    if (state.right) target = (target ?? paddle.x) + paddle.speed*2;
+
+    if (target != null) paddle.x += (target - paddle.x) * 0.25;
+    paddle.x = clamp(paddle.x, 0, dims.w - paddle.w);
+
+    // ball stays stuck during intro/countdown
+    if (state.phase !== 'play'){
+      ball.stuck = true;
+      ball.x = paddle.x + paddle.w/2;
+      ball.y = paddle.y - ball.r - 2;
+      return;
+    }
+
+    // ball
+    ball.x += ball.vx;
+    ball.y += ball.vy;
+
+    // walls
+    if (ball.x - ball.r < 0){ ball.x = ball.r; ball.vx *= -1; beep(520, 0.03, 'square', 0.03); }
+    if (ball.x + ball.r > dims.w){ ball.x = dims.w - ball.r; ball.vx *= -1; beep(520, 0.03, 'square', 0.03); }
+    if (ball.y - ball.r < 0){ ball.y = ball.r; ball.vy *= -1; beep(520, 0.03, 'square', 0.03); }
+
+    // miss
+    if (ball.y - ball.r > dims.h){
+      state.lives -= 1;
+      livesEl.textContent = String(state.lives);
+      beep(220, 0.12, 'sine', 0.07);
+      if (state.lives <= 0){
+        state.lost = true;
+        state.phase = 'lose';
+        state.running = false;
+      } else {
+        resetBall();
+      }
+      return;
+    }
+
+    // paddle collision
+    if (circleRectCollide(ball.x, ball.y, ball.r, paddle.x, paddle.y, paddle.w, paddle.h)){
+      const hit = (ball.x - (paddle.x + paddle.w/2)) / (paddle.w/2);
+      const angle = hit * (Math.PI/3);
+      const speed = clamp(Math.hypot(ball.vx, ball.vy) * 1.03, 4.8, ball.max);
+      ball.vx = Math.sin(angle) * speed;
+      ball.vy = -Math.cos(angle) * speed;
+      ball.y = paddle.y - ball.r - 0.5;
+      beep(760, 0.04, 'triangle', 0.045);
+    }
+
+    // brick collision
+    outer: for (let r=0;r<bricks.rows;r++){
+      for (let c=0;c<bricks.cols;c++){
+        const b = bricks.grid[r][c];
+        if (!b.alive) continue;
+        const bx = bricks.left + c*(bricks.w + bricks.gap);
+        const by = bricks.top  + r*(bricks.h + bricks.gap);
+        if (circleRectCollide(ball.x, ball.y, ball.r, bx, by, bricks.w, bricks.h)){
+          b.alive = false;
+          state.score += 10;
+          scoreEl.textContent = String(state.score);
+
+          const prevX = ball.x - ball.vx;
+          const fromLeft  = prevX <= bx;
+          const fromRight = prevX >= bx + bricks.w;
+          if (fromLeft || fromRight) ball.vx *= -1;
+          else ball.vy *= -1;
+
+          click(0.035);
+          break outer;
+        }
+      }
+    }
+
+    if (allCleared()){
+      state.won = true;
+      state.phase = 'win';
+      state.running = false;
+      fireworks.active = true;
+      fireworks.burst(6);
+      beep(990, 0.10, 'triangle', 0.07);
+      setTimeout(()=> beep(1320, 0.12, 'triangle', 0.06), 90);
+    }
+  }
+
+  // ===== render =====
+  function drawBackground(){
+    const bg = ctx.createLinearGradient(0,0,0,dims.h);
+    bg.addColorStop(0, 'rgba(255, 120, 190, 0.95)');
+    bg.addColorStop(1, 'rgba(255, 210, 235, 0.95)');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0,0,dims.w,dims.h);
+
+    ctx.fillStyle = 'rgba(255,255,255,0.10)';
+    ctx.fillRect(0,0,dims.w,dims.h);
+
+    // sparkles
+    ctx.save();
+    ctx.globalAlpha = 0.28;
+    for (let i=0;i<90;i++){
+      const x = (i*113)%dims.w;
+      const y = (i*71)%dims.h;
+      const s = 1 + (i%3);
+      ctx.fillStyle = 'rgba(255,255,255,0.9)';
+      ctx.fillRect(x,y,s,s);
+    }
+    ctx.restore();
+
+    // glow aura
+    const g = ctx.createRadialGradient(dims.w*0.5, dims.h*0.18, 30, dims.w*0.5, dims.h*0.18, dims.w*0.90);
+    g.addColorStop(0, 'rgba(255,255,255,0.22)');
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,dims.w,dims.h);
+  }
+
+  function drawBricks(){
+    for (let r=0;r<bricks.rows;r++){
+      for (let c=0;c<bricks.cols;c++){
+        const b = bricks.grid[r][c];
+        if (!b.alive) continue;
+        const x = bricks.left + c*(bricks.w + bricks.gap);
+        const y = bricks.top  + r*(bricks.h + bricks.gap);
+
+        const hue = 325 + (r*9 + c*5)%30;
+        ctx.fillStyle = `hsla(${hue}, 82%, 62%, 0.92)`;
+        roundRectPath(x,y,bricks.w,bricks.h,10);
+        ctx.fill();
+
+        ctx.save();
+        ctx.globalAlpha = 0.20;
+        ctx.fillStyle = 'white';
+        roundRectPath(x+2,y+2,bricks.w-4,Math.max(4, bricks.h*0.38),9);
+        ctx.fill();
+        ctx.restore();
+
+        ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+        ctx.lineWidth = 1;
+        roundRectPath(x+0.5,y+0.5,bricks.w-1,bricks.h-1,10);
+        ctx.stroke();
+      }
+    }
+  }
+
+  function drawPaddle(){
+    ctx.save();
+    ctx.fillStyle = 'rgba(255,255,255,0.92)';
+    roundRectPath(paddle.x, paddle.y, paddle.w, paddle.h, 999);
+    ctx.fill();
+    ctx.globalAlpha = 0.25;
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    roundRectPath(paddle.x, paddle.y + paddle.h*0.55, paddle.w, paddle.h*0.45, 999);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawBall(){
+    ctx.save();
+    const grad = ctx.createRadialGradient(ball.x - ball.r*0.35, ball.y - ball.r*0.35, 2, ball.x, ball.y, ball.r*1.5);
+    grad.addColorStop(0, 'rgba(255,255,255,1)');
+    grad.addColorStop(1, 'rgba(255,255,255,0.35)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawIntro(){
+    ctx.save();
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fillRect(0,0,dims.w,dims.h);
+
+    // ✅ 이전 에러 원인: 문자열 리터럴 안에 "실제 줄바꿈"이 들어가서 JS 파서가 깨졌음
+    //    해결: \n 이스케이프를 사용
+    wrapText('Tap to start\nsurprise', dims.w/2, dims.h*0.42, dims.w*0.90, 58,
+      '900 54px system-ui, -apple-system, Segoe UI, Roboto, Arial',
+      'rgba(255,255,255,0.98)');
+
+    ctx.font = '800 14px system-ui, -apple-system, Segoe UI, Roboto, Arial';
+    ctx.fillStyle = 'rgba(255,255,255,0.80)';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('화면을 한 번 탭하면 3초 카운트다운 후 시작돼요', dims.w/2, dims.h*0.57);
+
+    ctx.restore();
+  }
+
+  function drawCountdown(){
+    ctx.save();
+    ctx.fillStyle = 'rgba(0,0,0,0.28)';
+    ctx.fillRect(0,0,dims.w,dims.h);
+
+    const n = state.countdownLeft;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    ctx.shadowColor = 'rgba(255,255,255,0.7)';
+    ctx.shadowBlur = 22;
+    ctx.font = '900 110px system-ui, -apple-system, Segoe UI, Roboto, Arial';
+    ctx.fillStyle = 'rgba(255,255,255,0.98)';
+    ctx.fillText(String(n), dims.w/2, dims.h*0.42);
+
+    ctx.font = '800 16px system-ui, -apple-system, Segoe UI, Roboto, Arial';
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillText('ready…', dims.w/2, dims.h*0.52);
+
+    ctx.restore();
+  }
+
+  function drawOverlay(title){
+    ctx.save();
+    ctx.fillStyle = 'rgba(0,0,0,0.40)';
+    ctx.fillRect(0,0,dims.w,dims.h);
+
+    wrapText(title, dims.w/2, dims.h/2, dims.w*0.90, 62,
+      '900 46px system-ui, -apple-system, Segoe UI, Roboto, Arial',
+      'rgba(255,255,255,0.98)');
+
+    ctx.font = '800 14px system-ui, -apple-system, Segoe UI, Roboto, Arial';
+    ctx.fillStyle = 'rgba(255,255,255,0.75)';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('다시 시작 버튼을 누르면 또 할 수 있어요', dims.w/2, dims.h/2 + 66);
+
+    ctx.restore();
+  }
+
+  function drawPlayMessage(){
+    const pulse = 1 + 0.12 * Math.sin(timeSec * 2.0);
+    const sparkle = 0.70 + 0.25 * (0.5 + 0.5*Math.sin(timeSec * 3.6));
+    const y = dims.h * 0.60;
+
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    ctx.shadowColor = `rgba(255,255,255,${0.55*sparkle})`;
+    ctx.shadowBlur = 18;
+
+    ctx.font = '900 40px system-ui, -apple-system, Segoe UI, Roboto, Arial';
+    ctx.fillStyle = `rgba(255,255,255,${0.82 + 0.12*sparkle})`;
+    ctx.fillText(`${PLAY_TEXT_LEFT}    ${PLAY_TEXT_RIGHT}`, dims.w/2, y);
+
+    ctx.save();
+    ctx.translate(dims.w/2, y);
+    ctx.scale(pulse, pulse);
+    ctx.font = '900 40px system-ui, -apple-system, Segoe UI, Roboto, Arial';
+    ctx.shadowColor = `rgba(255,255,255,${0.72*sparkle})`;
+    ctx.shadowBlur = 22;
+    ctx.fillStyle = 'rgba(255,255,255,0.95)';
+    ctx.fillText('💗', 0, 1);
+    ctx.restore();
+
+    ctx.restore();
+  }
+
+  function draw(){
+    ctx.clearRect(0,0,dims.w,dims.h);
+    drawBackground();
+    drawBricks();
+    drawPaddle();
+    drawBall();
+
+    if (state.phase === 'intro') drawIntro();
+    if (state.phase === 'countdown') drawCountdown();
+    if (state.phase === 'play') drawPlayMessage();
+
+    if (state.phase === 'win'){
+      fireworks.draw();
+      drawOverlay(SURPRISE_MESSAGE);
+    } else if (state.phase === 'lose'){
+      drawOverlay('아쉽다… 한 번만 더!');
+    }
+  }
+
+  // ===== tests (console) =====
+  function assert(cond, msg){ if (!cond) throw new Error('TEST FAIL: ' + msg); }
+  (function runTests(){
+    assert(clamp(5,0,10)===5, 'clamp within');
+    assert(clamp(-1,0,10)===0, 'clamp low');
+    assert(clamp(999,0,10)===10, 'clamp high');
+    const r = rand(1,2);
+    assert(r>=1 && r<2, 'rand range');
+
+    // new: wrapText newline handling
+    const testStr = 'a\nb';
+    assert(testStr.includes('\\n') && testStr.split('\\n').length===2, 'newline split works');
+
+    resize();
+    assert(Array.isArray(bricks.grid) && bricks.grid.length === bricks.rows, 'brick grid rows');
+    assert(bricks.grid[0].length === bricks.cols, 'brick grid cols');
+
+    beginCountdown();
+    assert(state.phase === 'countdown' && state.countdownLeft === 3, 'countdown starts at 3');
+
+    console.log('[tests] ok');
+    resetGame();
+  })();
+
+  // ===== main loop =====
+  let last = performance.now();
+  function loop(now){
+    timeSec = now / 1000;
+    const dt = Math.min(0.033, (now-last)/1000);
+    last = now;
+
+    update(dt);
+    if (state.phase === 'win') fireworks.update(dt);
+
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  // init
+  resetGame();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
